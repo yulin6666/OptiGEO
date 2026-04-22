@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/lindediannao/Documents/**)",
+      "Bash(python3 -m venv venv)",
+      "Bash(ls:*)",
+      "WebFetch(domain:developers.cloudflare.com)",
+      "Bash(nc:*)",
+      "Bash(curl -I --connect-timeout 5 https://api.cloudflare.com)",
+      "Bash(cloudflared:*)",
+      "Bash(npm root:*)",
+      "Bash(shopify version:*)",
+      "Bash(find /usr/local/lib/node_modules/@shopify -name cloudflared*)",
+      "Bash(find /usr/local/lib/node_modules/@shopify/cli/dist -type f -name *cloudflared*)",
+      "Bash(grep -r cloudflared /usr/local/lib/node_modules/@shopify/cli/dist/ --include=*.js -l)",
+      "Bash(find /usr/local/lib/node_modules/@shopify/cli -name *.tgz -o -name *cloudflared*)",
+      "Read(//Users/lindediannao/Library/Caches/**)",
+      "Read(//Users/lindediannao/.cache/**)",
+      "Read(//private/tmp/**)",
+      "Bash(ln:*)",
+      "Bash(/usr/local/lib/node_modules/@shopify/cli/bin/cloudflared --version)",
+      "Bash(git config:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npm run:*)",
+      "Bash(git:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "shopify-dev-mcp"
+  ]
+}
