@@ -22,7 +22,10 @@
       "Bash(git config:*)",
       "mcp__ide__getDiagnostics",
       "Bash(npm run:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(shopify app:*)",
+      "Bash(mkdir:*)",
+      "Bash(python3 -m http.server 8000)"
     ]
   },
   "enableAllProjectMcpServers": true,
