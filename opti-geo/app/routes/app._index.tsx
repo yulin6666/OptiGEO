@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import FirecrawlApp from "@mendable/firecrawl-js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -119,16 +120,21 @@ async function runAudit(url: string): Promise<AuditResult> {
   });
 
   // 4. Sitemap
-  const hasSitemap = sitemapRes.ok && sitemapRes.text.includes("<url");
+  const hasSitemap = sitemapRes.ok && (sitemapRes.text.includes("<url") || sitemapRes.text.includes("<sitemap"));
   const sitemapUrlCount = (sitemapRes.text.match(/<url>/gi) ?? []).length;
+  const sitemapIndexCount = (sitemapRes.text.match(/<sitemap>/gi) ?? []).length;
+  const displayCount = sitemapUrlCount > 0 ? sitemapUrlCount : sitemapIndexCount;
+  const displayType = sitemapUrlCount > 0 ? "URLs" : "sitemaps";
   checks.push({
     id: "sitemap",
     label: "XML Sitemap",
     category: "discovery",
     pass: hasSitemap,
-    value: hasSitemap ? `${sitemapUrlCount} URLs` : "Missing",
+    value: hasSitemap ? `${displayCount} ${displayType}` : "Missing",
     detail: hasSitemap
-      ? `Sitemap found with ${sitemapUrlCount} URL entries.`
+      ? sitemapUrlCount > 0
+        ? `Sitemap found with ${sitemapUrlCount} URL entries.`
+        : `Sitemap index found with ${sitemapIndexCount} sub-sitemaps.`
       : "No sitemap.xml found. A sitemap helps AI systems discover and index your pages.",
   });
 
@@ -430,18 +436,83 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   await authenticate.admin(request);
 
   const formData = await request.formData();
+  const actionType = formData.get("action") as string;
   const url = formData.get("url") as string;
 
+  console.log("=== Action 被调用 ===");
+  console.log("actionType:", actionType);
+  console.log("url:", url);
+
   if (!url) {
+    console.log("❌ URL 缺失");
     return { error: "URL is required" };
   }
 
   try {
     new URL(url);
   } catch {
+    console.log("❌ URL 格式无效");
     return { error: "Invalid URL format" };
   }
 
+  // 生成 llms.txt 和 llms-full.txt
+  if (actionType === "generate_llms_txt") {
+    console.log("✅ 进入生成 llms.txt 逻辑");
+
+    const firecrawlApiKey = process.env.FIRECRAWL_API_KEY;
+    console.log("Firecrawl API Key 存在:", !!firecrawlApiKey);
+    console.log("API Key 前缀:", firecrawlApiKey?.substring(0, 10));
+
+    if (!firecrawlApiKey) {
+      console.log("❌ API Key 未配置");
+      return {
+        error: "Firecrawl API Key 未配置。请在 .env 文件中设置 FIRECRAWL_API_KEY"
+      };
+    }
+
+    try {
+      console.log("🚀 开始调用 Firecrawl API...");
+      const firecrawl = new FirecrawlApp({ apiKey: firecrawlApiKey });
+
+      console.log("📡 调用 v1.generateLLMsText...");
+      const result = await firecrawl.v1.generateLLMsText(url, {
+        maxUrls: 50,
+        showFullText: true
+      });
+
+      console.log("✅ Firecrawl 返回结果:", result);
+
+      // 检查是否成功
+      if (!result.success || !('data' in result)) {
+        const errorMsg = 'error' in result ? result.error : '生成失败';
+        console.error("❌ Firecrawl 返回失败:", errorMsg);
+        return {
+          error: `生成 llms.txt 失败: ${errorMsg}`
+        };
+      }
+
+      console.log("✅ Firecrawl 调用成功");
+      console.log("llmsTxt 长度:", result.data.llmstxt?.length);
+      console.log("llmsFullTxt 长度:", result.data.llmsfulltxt?.length);
+
+      return {
+        success: true,
+        action: "generate_llms_txt",
+        llmsTxt: result.data.llmstxt,
+        llmsFullTxt: result.data.llmsfulltxt
+      };
+
+    } catch (error) {
+      console.error("❌ Firecrawl 调用失败:", error);
+      const message = error instanceof Error ? error.message : "生成失败";
+      return {
+        error: `生成 llms.txt 失败: ${message}`
+      };
+    }
+  }
+
+  // 原有的审计逻辑
+  console.log("📊 执行审计逻辑");
   try {
     const result = await runAudit(url);
     return result;
@@ -492,8 +563,62 @@ function ScoreRing({ score }: { score: number }) {
   );
 }
 
-function CheckRow({ check }: { check: Check }) {
+function CheckRow({ check, auditUrl }: { check: Check; auditUrl: string }) {
   const [open, setOpen] = useState(false);
+  const fixFetcher = useFetcher();
+
+  // 判断是否可以修复
+  const canFix = !check.pass && (check.id === "llms_txt" || check.id === "llms_full_txt");
+  const isFixing = fixFetcher.state === "submitting";
+
+  // 检查是否生成成功
+  const isGenerated = fixFetcher.data &&
+    typeof fixFetcher.data === 'object' &&
+    'success' in fixFetcher.data &&
+    fixFetcher.data.success === true &&
+    'action' in fixFetcher.data &&
+    fixFetcher.data.action === "generate_llms_txt";
+
+  console.log("CheckRow 渲染:", {
+    checkId: check.id,
+    canFix,
+    isFixing,
+    isGenerated,
+    fetcherData: fixFetcher.data
+  });
+
+  // 处理文件下载
+  const handleDownload = () => {
+    if (!isGenerated || !fixFetcher.data) return;
+
+    const data = fixFetcher.data as any;
+    console.log("📥 开始下载文件");
+
+    // 下载 llms.txt
+    const blob1 = new Blob([data.llmsTxt], { type: 'text/plain;charset=utf-8' });
+    const url1 = URL.createObjectURL(blob1);
+    const a1 = document.createElement('a');
+    a1.href = url1;
+    a1.download = 'llms.txt';
+    document.body.appendChild(a1);
+    a1.click();
+    document.body.removeChild(a1);
+    URL.revokeObjectURL(url1);
+
+    // 下载 llms-full.txt
+    setTimeout(() => {
+      const blob2 = new Blob([data.llmsFullTxt], { type: 'text/plain;charset=utf-8' });
+      const url2 = URL.createObjectURL(blob2);
+      const a2 = document.createElement('a');
+      a2.href = url2;
+      a2.download = 'llms-full.txt';
+      document.body.appendChild(a2);
+      a2.click();
+      document.body.removeChild(a2);
+      URL.revokeObjectURL(url2);
+      console.log("✅ 文件下载完成");
+    }, 500);
+  };
 
   return (
     <div style={{ borderRadius: 8, border: "1px solid #e5e7eb", backgroundColor: "#fff", marginBottom: 8 }}>
@@ -519,6 +644,56 @@ function CheckRow({ check }: { check: Check }) {
         <span style={{ borderRadius: 6, backgroundColor: "#f3f4f6", padding: "2px 8px", fontSize: "0.75rem", color: "#6b7280" }}>
           {check.value}
         </span>
+
+        {canFix && !isGenerated && (
+          <fixFetcher.Form
+            method="post"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input type="hidden" name="action" value="generate_llms_txt" />
+            <input type="hidden" name="url" value={auditUrl} />
+            <button
+              type="submit"
+              disabled={isFixing}
+              style={{
+                padding: "4px 12px",
+                fontSize: "0.75rem",
+                fontWeight: 500,
+                color: "#fff",
+                backgroundColor: isFixing ? "#9ca3af" : "#5C6AC4",
+                border: "none",
+                borderRadius: 6,
+                cursor: isFixing ? "not-allowed" : "pointer",
+                transition: "background-color 0.2s",
+              }}
+            >
+              {isFixing ? "生成中..." : "生成"}
+            </button>
+          </fixFetcher.Form>
+        )}
+
+        {isGenerated && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDownload();
+            }}
+            style={{
+              padding: "4px 12px",
+              fontSize: "0.75rem",
+              fontWeight: 500,
+              color: "#fff",
+              backgroundColor: "#10b981",
+              border: "none",
+              borderRadius: 6,
+              cursor: "pointer",
+              transition: "background-color 0.2s",
+            }}
+          >
+            下载
+          </button>
+        )}
+
         <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>{open ? "▲" : "▼"}</span>
       </button>
       {open && (
@@ -545,6 +720,37 @@ export default function Index() {
     formData.append("url", url);
     fetcher.submit(formData, { method: "POST" });
   };
+
+  // 处理文件下载
+  useEffect(() => {
+    if (fetcher.data && 'success' in fetcher.data && fetcher.data.success && fetcher.data.action === "generate_llms_txt") {
+      const data = fetcher.data as any;
+
+      // 下载 llms.txt
+      const blob1 = new Blob([data.llmsTxt], { type: 'text/plain;charset=utf-8' });
+      const url1 = URL.createObjectURL(blob1);
+      const a1 = document.createElement('a');
+      a1.href = url1;
+      a1.download = 'llms.txt';
+      document.body.appendChild(a1);
+      a1.click();
+      document.body.removeChild(a1);
+      URL.revokeObjectURL(url1);
+
+      // 下载 llms-full.txt
+      setTimeout(() => {
+        const blob2 = new Blob([data.llmsFullTxt], { type: 'text/plain;charset=utf-8' });
+        const url2 = URL.createObjectURL(blob2);
+        const a2 = document.createElement('a');
+        a2.href = url2;
+        a2.download = 'llms-full.txt';
+        document.body.appendChild(a2);
+        a2.click();
+        document.body.removeChild(a2);
+        URL.revokeObjectURL(url2);
+      }, 500);
+    }
+  }, [fetcher.data]);
 
   const categories: CheckCategory[] = ["discovery", "structure", "content", "technical", "rendering"];
 
@@ -631,7 +837,7 @@ export default function Index() {
                   </h3>
                   <div>
                     {group.map((check) => (
-                      <CheckRow key={check.id} check={check} />
+                      <CheckRow key={check.id} check={check} auditUrl={result.url} />
                     ))}
                   </div>
                 </div>
