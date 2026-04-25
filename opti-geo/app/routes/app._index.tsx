@@ -310,15 +310,46 @@ async function runAudit(url: string): Promise<AuditResult> {
   // 15. Page Size
   const pageSizeKb = Math.round(html.length / 1024);
   const pageSizeOk = pageSizeKb < 500;
+
+  // Analyze page size breakdown
+  const inlineStyleTags = html.match(/<style[^>]*>([\s\S]*?)<\/style>/gi) ?? [];
+  const styleSize = inlineStyleTags.reduce((sum, tag) => sum + tag.length, 0);
+
+  const inlineScriptTags = html.match(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/gi) ?? [];
+  const scriptSize = inlineScriptTags.reduce((sum, tag) => sum + tag.length, 0);
+
+  const base64Images = html.match(/data:image\/[^;]+;base64,[^"')]+/g) ?? [];
+  const imageSize = base64Images.reduce((sum, img) => sum + img.length, 0);
+
+  const htmlStructureSize = html.length - styleSize - scriptSize - imageSize;
+
+  const breakdown = [
+    { label: "HTML Structure", size: htmlStructureSize, percent: Math.round((htmlStructureSize / html.length) * 100) },
+    { label: "Inline CSS", size: styleSize, percent: Math.round((styleSize / html.length) * 100) },
+    { label: "Inline JavaScript", size: scriptSize, percent: Math.round((scriptSize / html.length) * 100) },
+    { label: "Base64 Images", size: imageSize, percent: Math.round((imageSize / html.length) * 100) },
+  ].filter(item => item.size > 0).sort((a, b) => b.size - a.size);
+
+  const breakdownText = breakdown.map(item =>
+    `  • ${item.label}: ${Math.round(item.size / 1024)} KB (${item.percent}%)`
+  ).join("\n");
+
+  const recommendations: string[] = [];
+  if (scriptSize > 200_000) recommendations.push("Inline JS is large — consider code splitting or external files");
+  if (styleSize > 100_000) recommendations.push("Inline CSS is large — consider external stylesheets");
+  if (imageSize > 100_000) recommendations.push("Base64 images detected — use external image files with CDN");
+
+  const detailText = pageSizeOk
+    ? "Page size is reasonable for fast loading."
+    : `Page is large (>500 KB). Heavy pages may timeout AI crawlers.\n\nSize breakdown:\n${breakdownText}${recommendations.length > 0 ? "\n\nRecommendations:\n  • " + recommendations.join("\n  • ") : ""}`;
+
   checks.push({
     id: "page_size",
     label: "Page Size",
     category: "technical",
     pass: pageSizeOk,
     value: `${pageSizeKb} KB`,
-    detail: pageSizeOk
-      ? "Page size is reasonable for fast loading."
-      : "Page is large (>500 KB). Heavy pages may timeout AI crawlers.",
+    detail: detailText,
   });
 
   // 16. Language Tag
@@ -697,7 +728,7 @@ function CheckRow({ check, auditUrl }: { check: Check; auditUrl: string }) {
         <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>{open ? "▲" : "▼"}</span>
       </button>
       {open && (
-        <div style={{ borderTop: "1px solid #e5e7eb", padding: "10px 16px", fontSize: "0.875rem", color: "#6b7280", lineHeight: 1.6 }}>
+        <div style={{ borderTop: "1px solid #e5e7eb", padding: "10px 16px", fontSize: "0.875rem", color: "#6b7280", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
           {check.detail}
         </div>
       )}

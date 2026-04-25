@@ -46,7 +46,8 @@
       "WebFetch(domain:pagespeedmatters.com)",
       "WebFetch(domain:www.dekstech.com)",
       "WebFetch(domain:ztabs.co)",
-      "WebFetch(domain:webmedic.com)"
+      "WebFetch(domain:webmedic.com)",
+      "Bash(npx tsc:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
