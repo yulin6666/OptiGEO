@@ -5,15 +5,16 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import { authenticate } from "../shopify.server";
 import { runAiScraper } from "../lib/ai-detection/brightdata-scraper.server";
-import { generateDetectionPrompt, generateNicheDetectionPrompts } from "../lib/ai-detection/openrouter.server";
+import { generateDetectionPrompt, generateNicheDetectionPrompts, extractNicheFromUrl } from "../lib/ai-detection/openrouter.server";
 import { calcVisibilityScore, detectSentiment, findMentions } from "../lib/ai-detection/scoring";
 import { PROVIDERS, type Provider, type VisibilityResult } from "../lib/ai-detection/types";
 
 type ActionData = {
   error?: string;
-  phase?: "generate" | "detect" | "niche_generate";
+  phase?: "generate" | "detect" | "niche_generate" | "extract_niche";
   url?: string;
   prompt?: string;
+  niche?: string;
   nichePrompts?: string[];
   startedAt?: string;
   completedAt?: string;
@@ -60,6 +61,39 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionDat
   const rawUrl = String(formData.get("url") || "").trim();
 
   console.log(`[ai-detection][action] start phase=${phase} rawUrl=${rawUrl}`);
+
+  if (phase === "extract_niche") {
+    if (!rawUrl) {
+      console.error("[ai-detection][action] phase=extract_niche validation failed: URL is required");
+      return { phase: "extract_niche", error: "URL is required" };
+    }
+
+    const normalizedUrlForNiche = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+
+    if (!isValidUrl(rawUrl)) {
+      console.error(`[ai-detection][action] phase=extract_niche validation failed: invalid URL rawUrl=${rawUrl}`);
+      return { phase: "extract_niche", error: "Invalid URL format" };
+    }
+
+    try {
+      console.log(`[ai-detection][action] phase=extract_niche start url=${normalizedUrlForNiche}`);
+      const niche = await extractNicheFromUrl(normalizedUrlForNiche);
+      console.log(`[ai-detection][action] phase=extract_niche success niche="${niche}" elapsed=${Date.now() - actionStartedAt}ms`);
+      return {
+        phase: "extract_niche",
+        url: normalizedUrlForNiche,
+        niche,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to extract niche";
+      console.error(`[ai-detection][action] phase=extract_niche failed error=${message}`);
+      return {
+        phase: "extract_niche",
+        url: rawUrl,
+        error: message,
+      };
+    }
+  }
 
   if (phase === "niche_generate") {
     const niche = String(formData.get("niche") || "").trim();
@@ -219,9 +253,6 @@ function sentimentColor(sentiment: VisibilityResult["sentiment"]) {
 export default function AiDetectionPage() {
   const fetcher = useFetcher<ActionData>();
 
-  const [url, setUrl] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [generated, setGenerated] = useState(false);
   const [niche, setNiche] = useState("");
   const [nichePrompts, setNichePrompts] = useState<string[]>([]);
   const [resultData, setResultData] = useState<ActionData | null>(null);
@@ -234,9 +265,9 @@ export default function AiDetectionPage() {
   useEffect(() => {
     if (!fetcher.data) return;
 
-    if (fetcher.data.phase === "generate" && fetcher.data.prompt) {
-      setPrompt(fetcher.data.prompt);
-      setGenerated(true);
+    if (fetcher.data.phase === "extract_niche" && fetcher.data.niche) {
+      setNiche(fetcher.data.niche);
+      setNichePrompts([]);
       setResultData(null);
     }
 
@@ -283,90 +314,11 @@ export default function AiDetectionPage() {
 
   return (
     <s-page heading="AI 引擎检测看板">
-      {/* ── Section 1: URL → single prompt ─────────────────────────── */}
+      {/* ── Section: URL → niche → multiple prompts ───────────────── */}
       <s-section>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: "#111827" }}>
-            方式一：输入网址，自动生成检测 Prompt
-          </div>
-
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://example.com"
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                fontSize: "0.875rem",
-                border: "1px solid #d1d5db",
-                borderRadius: 8,
-              }}
-            />
-            <s-button
-              onClick={() => {
-                if (!url.trim()) return;
-                const fd = new FormData();
-                fd.append("phase", "generate");
-                fd.append("url", url.trim());
-                fetcher.submit(fd, { method: "POST" });
-              }}
-              {...(submitPhase === "generate" ? { loading: true } : {})}
-            >
-              Analyze
-            </s-button>
-          </div>
-
-          {fetcher.data?.phase === "generate" && fetcher.data.error && (
-            <div style={{ padding: 12, borderRadius: 8, border: "1px solid #fecaca", backgroundColor: "#fef2f2", color: "#991b1b", fontSize: "0.875rem" }}>
-              {fetcher.data.error}
-            </div>
-          )}
-
-          {generated && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <label style={{ fontSize: "0.875rem", fontWeight: 600, color: "#111827" }}>
-                Detection Prompt
-              </label>
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                rows={3}
-                style={{
-                  width: "100%",
-                  padding: 12,
-                  fontSize: "0.875rem",
-                  border: "1px solid #d1d5db",
-                  borderRadius: 8,
-                  resize: "vertical",
-                }}
-              />
-              <div>
-                <s-button
-                  onClick={() => {
-                    if (!prompt.trim()) return;
-                    const fd = new FormData();
-                    fd.append("phase", "detect");
-                    fd.append("url", url.trim());
-                    fd.append("prompt", prompt.trim());
-                    fetcher.submit(fd, { method: "POST" });
-                  }}
-                  {...(submitPhase === "detect" ? { loading: true } : {})}
-                >
-                  Run Detection
-                </s-button>
-              </div>
-            </div>
-          )}
-        </div>
-      </s-section>
-
-      {/* ── Section 2: Niche → multiple prompts ─────────────────────── */}
-      <s-section>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "#111827" }}>
-            方式二：输入品类/细分市场，批量生成检测 Prompts
+            输入网址，自动提炼品类，批量生成检测 Prompts
           </div>
 
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -374,7 +326,7 @@ export default function AiDetectionPage() {
               type="text"
               value={niche}
               onChange={(e) => setNiche(e.target.value)}
-              placeholder="例如：台湾奶茶品牌、AI SEO 工具、B2B SaaS 营销软件"
+              placeholder="例如：台湾奶茶品牌、AI SEO 工具、B2B SaaS 营销软件（或直接输入网址自动提炼）"
               style={{
                 flex: 1,
                 padding: "10px 12px",
@@ -396,6 +348,59 @@ export default function AiDetectionPage() {
               Generate Prompts
             </s-button>
           </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
+            <span style={{ fontSize: 12, color: "#9ca3af" }}>或者</span>
+            <div style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
+          </div>
+
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <input
+              type="text"
+              id="niche-url-input"
+              placeholder="输入网址，自动分析品类，例如 https://example.com"
+              style={{
+                flex: 1,
+                padding: "10px 12px",
+                fontSize: "0.875rem",
+                border: "1px solid #d1d5db",
+                borderRadius: 8,
+              }}
+            />
+            <s-button
+              onClick={() => {
+                const input = document.getElementById("niche-url-input") as HTMLInputElement;
+                const val = input?.value?.trim();
+                if (!val) return;
+                const fd = new FormData();
+                fd.append("phase", "extract_niche");
+                fd.append("url", val);
+                fetcher.submit(fd, { method: "POST" });
+              }}
+              {...(submitPhase === "extract_niche" ? { loading: true } : {})}
+            >
+              从网址提炼品类
+            </s-button>
+          </div>
+
+          {submitPhase === "extract_niche" && (
+            <div style={{ padding: 12, borderRadius: 8, border: "1px solid #dbeafe", backgroundColor: "#eff6ff", color: "#1e40af", fontSize: "0.875rem" }}>
+              正在抓取网页并分析品类，请稍候...
+            </div>
+          )}
+
+          {fetcher.data?.phase === "extract_niche" && fetcher.data.error && (
+            <div style={{ padding: 12, borderRadius: 8, border: "1px solid #fecaca", backgroundColor: "#fef2f2", color: "#991b1b", fontSize: "0.875rem" }}>
+              {fetcher.data.error}
+            </div>
+          )}
+
+          {fetcher.data?.phase === "extract_niche" && fetcher.data.niche && (
+            <div style={{ padding: 12, borderRadius: 8, border: "1px solid #d1fae5", backgroundColor: "#ecfdf5", color: "#065f46", fontSize: "0.875rem" }}>
+              已提炼品类：<strong>{fetcher.data.niche}</strong>（已填入上方输入框，可编辑后点击 Generate Prompts）
+            </div>
+          )}
 
           {fetcher.data?.phase === "niche_generate" && fetcher.data.error && (
             <div style={{ padding: 12, borderRadius: 8, border: "1px solid #fecaca", backgroundColor: "#fef2f2", color: "#991b1b", fontSize: "0.875rem" }}>
