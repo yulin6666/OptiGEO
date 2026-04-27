@@ -149,26 +149,25 @@ export async function generateNicheDetectionPrompts(
 
   console.log(`[ai-detection][openrouter] niche cache miss niche="${niche}"`);
 
-  const userMessage = `Generate ${count} short search queries in English for: "${niche}"
+  const userMessage = `Generate ${count} short search queries in English that people type into AI assistants (ChatGPT, Perplexity, etc.) when looking for: "${niche}"
 
-Requirements:
-- Natural questions people type into ChatGPT
-- Under 12 words each
-- Mix: "where to buy", "what's best", "recommend", "worth it"
-- Some add "with reviews" or "according to experts"
+Rules:
+- Each query must be under 12 words
+- Mix intents: "where to buy", "best", "recommend", "worth it", "reviews"
+- Sound like real user questions, not marketing copy
+- Do NOT include the brand name or domain
 
-Examples:
-"where can I buy good quality Chinese tea"
-"what's the best high mountain tea brand"
-"is loose leaf tea worth buying"
-
-Output: Just the numbered list of ${count} queries.`;
+Return ONLY a JSON array of ${count} strings. No explanation, no markdown, no numbering. Example format:
+["query one here", "query two here", "query three here"]`;
 
   const requestBody = {
     model: "moonshotai/kimi-k2.5",
-    messages: [{ role: "user", content: userMessage }],
-    max_tokens: 1500,
-    temperature: 0.2,
+    messages: [
+      { role: "system", content: "You are a helpful assistant. Output ONLY the requested JSON. No reasoning, no explanation, no markdown." },
+      { role: "user", content: userMessage },
+    ],
+    max_tokens: 8000,
+    temperature: 0.4,
   };
 
   console.log("[ai-detection][openrouter] niche request -> https://openrouter.ai/api/v1/chat/completions");
@@ -217,6 +216,17 @@ Output: Just the numbered list of ${count} queries.`;
     console.log(`[ai-detection][openrouter] niche content was null, fell back to reasoning field`);
   }
 
+  // For reasoning models, extract JSON payload from mixed reasoning text
+  if (rawText.includes("{") || rawText.includes("[")) {
+    const jsonObjectMatch = rawText.match(/\{[\s\S]*\}/);
+    const jsonArrayMatch = rawText.match(/\[[\s\S]*\]/);
+    if (jsonArrayMatch?.[0]) {
+      rawText = jsonArrayMatch[0];
+    } else if (jsonObjectMatch?.[0]) {
+      rawText = jsonObjectMatch[0];
+    }
+  }
+
   if (!rawText) {
     console.error("[ai-detection][openrouter] niche empty response content after parse");
     throw new Error("OpenRouter returned empty response");
@@ -237,6 +247,21 @@ function parseNicheQueryList(raw: string, max: number): string[] {
   // Strip markdown fences
   const stripped = raw.replace(/```[\s\S]*?```/g, "").trim();
 
+  const dedupeAndLimit = (items: string[]) => {
+    const seen = new Set<string>();
+    const cleaned: string[] = [];
+    for (const item of items) {
+      const q = item.replace(/^"+|"+$/g, "").replace(/\s+/g, " ").trim();
+      if (!q) continue;
+      const key = q.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cleaned.push(q);
+      if (cleaned.length >= max) break;
+    }
+    return cleaned;
+  };
+
   // Try JSON array first
   const jsonMatch = stripped.match(/\[[\s\S]*\]/);
   if (jsonMatch) {
@@ -245,38 +270,65 @@ function parseNicheQueryList(raw: string, max: number): string[] {
       if (Array.isArray(arr)) {
         const items = arr
           .map((item: unknown) => (typeof item === "string" ? item.trim() : ""))
-          .filter((s: string) => s.length > 10);
-        if (items.length > 0) return items.slice(0, max);
+          .filter((s: string) => s.length > 4 && s.length < 180);
+        const parsed = dedupeAndLimit(items);
+        if (parsed.length > 0) return fillFallbackQueries(parsed, max);
       }
     } catch {
       // fall through to line parsing
     }
   }
 
-  // Line-by-line parsing
+  // Line-by-line parsing fallback
   const fromLines = stripped
     .split("\n")
     .map((line) =>
       line
         .replace(/^[\s]*[-*•][\s]+/, "")
         .replace(/^[\s]*\d+[.)]\s+/, "")
-        .replace(/^["']+|["']+$/g, "")
+        .replace(/^"+|"+$/g, "")
         .replace(/\*\*/g, "")
         .trim(),
     )
-    .filter((line) => line.length > 10 && line.length < 300)
-    .filter((line) => !/^(here\s+(are|is)|high[- ]intent|sure|certainly|below|the following|key requirements|short and simple|casual|everyday|mix of styles|some mention|numbered list|all in english|the target|good examples|output)\b/i.test(line))
+    .filter((line) => line.length > 4 && line.length < 180)
     .filter((line) => line.includes(" "))
-    .filter((line) => {
-      // Filter out lines that look like instructions rather than queries
-      const instructionPatterns = [
-        /^(most under|use |mix |some |make them|keep |no fancy|generate)/i,
-        /\b(language|jargon|keywords|sources|examples|requirements)\b/i,
-      ];
-      return !instructionPatterns.some(pattern => pattern.test(line));
-    });
+    .filter((line) => !/^(here\s+(are|is)|sure|certainly|below|the following|output|example|note|rules?)\b/i.test(line))
+    .filter((line) => !/^(each\s+query\s+must|mix\s+intents|sound\s+like|do\s+not\s+include|return\s+only)/i.test(line))
+    .filter((line) => !/\b(json|array|numbering|markdown|brand name|domain|marketing copy|under\s+12\s+words)\b/i.test(line))
+    .filter((line) => !/[:：]\s*"?(where to buy|best|recommend|worth it|reviews)"?/i.test(line));
 
-  return fromLines.slice(0, max);
+  const parsed = dedupeAndLimit(fromLines);
+  return fillFallbackQueries(parsed, max);
+}
+
+function fillFallbackQueries(existing: string[], max: number): string[] {
+  if (existing.length >= max) return existing.slice(0, max);
+
+  const fallback = [
+    "where can I buy this online",
+    "what are the best options in this category",
+    "is this worth buying",
+    "best product in this niche with reviews",
+    "recommended brands in this category",
+    "top rated options according to experts",
+    "what should I look for before buying",
+    "most trusted choices for this product type",
+    "best value option in this niche",
+    "which option has the best customer reviews",
+    "what is the difference between top options",
+    "where to buy with fast shipping",
+  ];
+
+  const result = [...existing];
+  const seen = new Set(result.map((q) => q.toLowerCase()));
+  for (const q of fallback) {
+    if (result.length >= max) break;
+    if (seen.has(q.toLowerCase())) continue;
+    seen.add(q.toLowerCase());
+    result.push(q);
+  }
+
+  return result.slice(0, max);
 }
 
 /**
@@ -369,24 +421,25 @@ export async function extractNicheFromUrl(url: string): Promise<string> {
   // Extract website content
   const { title, description, content } = await extractWebsiteContent(url);
 
-  // Build prompt for LLM - keep it concise for reasoning model
-  const userMessage = `Analyze this website and describe its business niche in 1-2 short English sentences.
+  // Build prompt for LLM
+  const userMessage = `Analyze this website and describe its business niche in ONE concise English sentence (under 100 characters).
 
 Website: ${url}
 Title: ${title}
 Description: ${description}
 Content: ${content.slice(0, 1000)}
 
-Output: A concise niche statement in English (under 100 characters).
-Example: "Premium Chinese loose leaf tea brand, direct-sourced from mountain farms, sold online in the US"
-
-Generate the niche statement:`;
+Return ONLY a JSON object with a single "niche" field. No explanation, no markdown. Example format:
+{"niche": "Premium Chinese loose leaf tea brand, direct-sourced from mountain farms"}`;
 
   const requestBody = {
     model: "moonshotai/kimi-k2.5",
-    messages: [{ role: "user", content: userMessage }],
-    max_tokens: 1500,
-    temperature: 0.2,
+    messages: [
+      { role: "system", content: "You are a helpful assistant. Output ONLY the requested JSON. No reasoning, no explanation, no markdown." },
+      { role: "user", content: userMessage },
+    ],
+    max_tokens: 8000,
+    temperature: 0.3,
   };
 
   console.log("[ai-detection][openrouter] niche extraction request -> https://openrouter.ai/api/v1/chat/completions");
@@ -421,50 +474,66 @@ Generate the niche statement:`;
   console.log(`[ai-detection][openrouter] niche extraction response payload preview=${JSON.stringify(payload).slice(0, 500)}`);
 
   const msg = payload.choices?.[0]?.message;
-  let niche = "";
+  let rawText = "";
   if (typeof msg?.content === "string") {
-    niche = msg.content.trim();
+    rawText = msg.content.trim();
   } else if (Array.isArray(msg?.content)) {
-    niche = msg.content
+    rawText = msg.content
       .map((part) => (typeof part?.text === "string" ? part.text : ""))
       .join("\n")
       .trim();
   }
 
-  // Fallback to reasoning field
-  if (!niche && typeof msg?.reasoning === "string" && msg.reasoning.trim()) {
-    const reasoning = msg.reasoning.trim();
-    console.log(`[ai-detection][openrouter] niche content was null, parsing reasoning field length=${reasoning.length}`);
+  if (!rawText) {
+    console.error("[ai-detection][openrouter] niche extraction empty response content");
+    throw new Error("OpenRouter returned empty response");
+  }
 
-    // Try to extract the final answer from reasoning
-    // Look for sentences that look like niche descriptions (contain key business words)
-    const lines = reasoning.split("\n").filter(Boolean);
-    const businessKeywords = /\b(brand|company|business|service|product|platform|marketplace|store|shop|sell|offer|provide|specialize)\b/i;
+  // Try to parse JSON first
+  let niche = "";
+  const jsonMatch = rawText.match(/\{[\s\S]*"niche"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (typeof parsed.niche === "string" && parsed.niche.trim()) {
+        niche = parsed.niche.trim();
+        console.log(`[ai-detection][openrouter] parsed niche from JSON: "${niche}"`);
+      }
+    } catch (e) {
+      console.warn(`[ai-detection][openrouter] JSON parse failed, falling back to text extraction`);
+    }
+  }
 
-    // Find lines that contain business keywords and are reasonable length
-    const candidates = lines.filter(line => {
-      const trimmed = line.trim();
-      return businessKeywords.test(trimmed) && trimmed.length >= 20 && trimmed.length <= 200;
-    });
+  // Fallback: extract "niche statement" from free text/reasoning
+  if (!niche) {
+    const text = rawText.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
+    const labelMatch = text.match(/niche\s*statement\s*[:：]\s*([^\n.]{20,220})/i);
+    if (labelMatch?.[1]) {
+      niche = labelMatch[1].trim();
+      console.log(`[ai-detection][openrouter] extracted niche from niche-statement label: "${niche}"`);
+    }
+  }
 
-    if (candidates.length > 0) {
-      // Take the last matching line (likely the final answer)
-      niche = candidates[candidates.length - 1].trim();
-      console.log(`[ai-detection][openrouter] extracted niche from reasoning: "${niche}"`);
-    } else {
-      // Fallback to last non-empty line
-      const lastLine = lines[lines.length - 1] || "";
-      niche = lastLine.trim();
-      console.log(`[ai-detection][openrouter] fell back to last reasoning line: "${niche}"`);
+  // Fallback: extract first reasonable sentence
+  if (!niche) {
+    const sentences = rawText
+      .replace(/```[\s\S]*?```/g, "")
+      .split(/[.\n]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 20 && s.length <= 200);
+
+    if (sentences.length > 0) {
+      niche = sentences[0];
+      console.log(`[ai-detection][openrouter] extracted niche from first sentence: "${niche}"`);
     }
   }
 
   if (!niche) {
-    console.error("[ai-detection][openrouter] niche extraction empty response content after parse");
-    throw new Error("OpenRouter returned empty response");
+    console.error("[ai-detection][openrouter] niche extraction failed to parse response");
+    throw new Error("Failed to extract niche from response");
   }
 
-  // Clean up the niche text (remove quotes, extra whitespace)
+  // Clean up
   niche = niche
     .replace(/^["']+|["']+$/g, "")
     .replace(/\s+/g, " ")

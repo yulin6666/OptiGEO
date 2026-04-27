@@ -13,6 +13,29 @@ datasource db {
   url      = "file:dev.sqlite"
 }
 
+model AuditSnapshot {
+  id         String   @id @default(cuid())
+  shop       String
+  url        String
+  score      Int
+  checksJson String
+  createdAt  DateTime @default(now())
+
+  @@index([shop])
+}
+
+model DetectionSnapshot {
+  id          String   @id @default(cuid())
+  shop        String
+  url         String?
+  prompt      String
+  avgScore    Int
+  resultsJson String
+  createdAt   DateTime @default(now())
+
+  @@index([shop])
+}
+
 model Session {
   id            String    @id
   shop          String

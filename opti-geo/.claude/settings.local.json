@@ -47,7 +47,9 @@
       "WebFetch(domain:www.dekstech.com)",
       "WebFetch(domain:ztabs.co)",
       "WebFetch(domain:webmedic.com)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(find /home/user -maxdepth 3 -type f -name *.tsx)",
+      "Bash(npx prisma:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
